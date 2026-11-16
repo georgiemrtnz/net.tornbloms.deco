@@ -131,6 +131,9 @@ class TplinkDecoDevice extends Device {
   // Guards against overlapping poll cycles — see updateDeviceMetrics().
   private pollInFlight = false;
 
+  // Hostname whose shared poller this device is subscribed to, or null.
+  private pollHost: string | null = null;
+
   private reAuthFailures = 0;
   private reAuthBlockedUntil = 0;
 
@@ -377,17 +380,10 @@ class TplinkDecoDevice extends Device {
               clearTimeout(this.pollStartTimerId);
               this.pollStartTimerId = null;
             }
-            if (this.timeoutSecondsIntervalId) {
-              clearInterval(this.timeoutSecondsIntervalId);
-              this.timeoutSecondsIntervalId = null;
-            }
+            this.stopPolling();
           } else {
             const resumedInterval = (this.getSettings().timeoutSeconds || 30) * 1000;
-            try {
-              await this.updateDeviceMetrics();
-            } catch (e: any) {
-              this.error('Resume poll failed', e);
-            }
+            // Joining the shared poller runs this node once straight away.
             this.setUpdateInterval(resumedInterval);
           }
         });
@@ -437,7 +433,8 @@ class TplinkDecoDevice extends Device {
             if (!this.connected) {
               await this.reAuthenticate();
             }
-            await this.updateDeviceMetrics();
+            // Joins the host's shared poller, which runs this node once now
+            // (reusing a fresh shared device_list if a sibling just fetched it).
             this.setUpdateInterval(interval);
           } catch (e: any) {
             this.log('Startup delay timer: device already gone, skipping', e?.message);
@@ -476,6 +473,11 @@ class TplinkDecoDevice extends Device {
 
     // Reinitialize API if hostname or password has changed
     if (changedKeys.includes('hostname') || changedKeys.includes('password')) {
+      // Move to the new host's shared poller (if polling). The old host's
+      // poller stops once its last device leaves. Restarted in `finally` so a
+      // failed re-auth doesn't leave the device silently unpolled.
+      const wasPolling = this.pollHost !== null;
+      this.stopPolling();
       try {
         const driver = this.driver as TplinkDecoDriver;
         this.api = driver.getOrCreateSharedApi(newSettings.hostname, this.makeLogger());
@@ -493,6 +495,10 @@ class TplinkDecoDevice extends Device {
         this.log('API reinitialized with updated settings');
       } catch (error) {
         this.error('Failed to reinitialize API', error);
+      } finally {
+        if (wasPolling && newSettings.hostname) {
+          this.startPolling(newSettings.hostname, (newSettings.timeoutSeconds || 30) * 1000);
+        }
       }
     }
 
@@ -500,7 +506,9 @@ class TplinkDecoDevice extends Device {
     // the interval stays cleared until the user resumes via polling_active)
     if (changedKeys.includes('timeoutSeconds') && this.getCapabilityValue('polling_active') !== false) {
       const interval = (newSettings.timeoutSeconds || 15) * 1000; // Default to 15 seconds if not set
-      this.setUpdateInterval(interval);
+      // getSettings() still returns the OLD values inside onSettings, so pass
+      // the new hostname explicitly.
+      this.setUpdateInterval(interval, newSettings.hostname);
       this.log(
         `Update interval changed to ${newSettings.timeoutSeconds} seconds`,
       );
@@ -530,6 +538,7 @@ class TplinkDecoDevice extends Device {
       clearTimeout(this.pollStartTimerId);
       this.pollStartTimerId = null;
     }
+    this.stopPolling();
     if (this.timeoutSecondsIntervalId) {
       clearInterval(this.timeoutSecondsIntervalId);
       this.timeoutSecondsIntervalId = null;
@@ -555,6 +564,7 @@ class TplinkDecoDevice extends Device {
       clearTimeout(this.pollStartTimerId);
       this.pollStartTimerId = null;
     }
+    this.stopPolling();
     if (this.timeoutSecondsIntervalId) {
       clearInterval(this.timeoutSecondsIntervalId);
       this.log('Cleared interval for device metrics update');
@@ -566,8 +576,8 @@ class TplinkDecoDevice extends Device {
    * Sets up or updates the interval for updating device metrics.
    * @param interval - The interval in milliseconds.
    */
-  private setUpdateInterval(interval: number) {
-    // Clear any existing interval and any pending first-poll offset
+  private setUpdateInterval(interval: number, hostname?: string) {
+    // Legacy per-device timers are no longer used, but clear them defensively.
     if (this.timeoutSecondsIntervalId) {
       clearInterval(this.timeoutSecondsIntervalId);
       this.timeoutSecondsIntervalId = null;
@@ -576,31 +586,49 @@ class TplinkDecoDevice extends Device {
       clearTimeout(this.pollStartTimerId);
       this.pollStartTimerId = null;
     }
+    const host = (hostname ?? this.getSettings().hostname ?? '').trim();
+    if (!host) return;
+    if (this.pollHost === host) {
+      (this.driver as TplinkDecoDriver).setPollInterval(host, this.getData().id, interval);
+      this.log(`Set update interval to ${interval / 1000}s (shared poller for ${host})`);
+      return;
+    }
+    this.stopPolling();
+    this.startPolling(host, interval);
+  }
 
-    // Spread each node's polls across the whole interval rather than nudging
-    // them a few seconds apart.
-    //
-    // Three users have reported the app destabilising their network — one
-    // A/B-tested it over several days on a three-node XE75 Pro mesh (internet
-    // solid with the app off, down within half an hour of switching it back on),
-    // another saw an X60 mesh drop for ~5 minutes at a time and fixed it by
-    // raising the interval from 10s to 30s. Both were running every node's poll
-    // within a 5-second window of each other, so the router took the whole
-    // mesh's worth of API calls in one burst each cycle. A jitter window equal
-    // to the interval turns that burst into a steady trickle at the same total
-    // rate. The first poll is offset too, so a restart doesn't line every device
-    // up again.
-    const jitter = Math.random() * interval;
-    if (this.pollStartTimerId) clearTimeout(this.pollStartTimerId);
-    this.pollStartTimerId = setTimeout(() => {
-      this.pollStartTimerId = null;
-      this.updateDeviceMetrics();
-      this.timeoutSecondsIntervalId = setInterval(
-        this.updateDeviceMetrics.bind(this),
-        interval,
-      );
-    }, jitter);
-    this.log(`Set update interval to ${interval / 1000}s (first poll in ${Math.round(jitter / 1000)}s)`);
+  /**
+   * Joins the host's shared poller (lib/hostPoller.ts). The poller fetches the
+   * mesh-wide device_list once per cycle for every node on the host and calls
+   * updateDeviceMetrics() with it; this node still fetches its own per-node
+   * client_list (and, on the master, performance/WAN/internet). The previous
+   * per-node interval + jitter existed to spread N identical bursts; with one
+   * shared fetch and sequential per-node dispatch there is no burst to spread.
+   */
+  private startPolling(host: string, interval: number): void {
+    this.pollHost = host;
+    this.log(`Joining shared poller for ${host} (interval ${interval / 1000}s)`);
+    (this.driver as TplinkDecoDriver)
+      .subscribePoll(host, this.getData().id, {
+        intervalMs: interval,
+        onCycle: (shared) => this.updateDeviceMetrics(shared.value),
+        // Same condition updateDeviceMetrics() uses to skip a cycle; if every
+        // node on the host is backing off, the shared fetch is skipped too.
+        isIdle: () => !this.connected && Date.now() < this.reAuthBlockedUntil,
+        // Master runs last so its mesh-wide merge sees this cycle's slave lists.
+        order: () => ((this.getSettings().role ?? '').toLowerCase() === 'master' ? 1 : 0),
+      }, this.makeLogger())
+      .catch((e) => this.error('Shared poll subscribe failed', e));
+  }
+
+  private stopPolling(): void {
+    if (this.pollHost === null) return;
+    try {
+      (this.driver as TplinkDecoDriver).unsubscribePoll(this.pollHost, this.getData().id);
+    } catch (e) {
+      this.error('Shared poll unsubscribe failed', e);
+    }
+    this.pollHost = null;
   }
 
   /**
@@ -817,7 +845,7 @@ class TplinkDecoDevice extends Device {
    * Updates device metrics by fetching data from the API and updating capabilities.
    * Handles performance metrics, WAN IP address, internet status, client list, and client state changes.
    */
-  private async updateDeviceMetrics() {
+  private async updateDeviceMetrics(sharedDeviceList?: any) {
     // A poll can take longer than the interval on a slow mesh — the per-request
     // timeout alone is 15s against a 15s minimum interval — and nothing stopped
     // a second cycle starting while the first was still in flight. Overlapping
@@ -844,8 +872,9 @@ class TplinkDecoDevice extends Device {
       const settings = this.getSettings();
       const devicedata = this.getData();
 
-      // Retrieve device list from the API
-      const deviceList = await this.safeApiCall(
+      // Device list: normally supplied by the host's shared poller (one fetch
+      // per cycle for the whole mesh). Fetched directly only if called without it.
+      const deviceList = sharedDeviceList ?? await this.safeApiCall(
         () =>
           this.api.custom(
             '/admin/device',

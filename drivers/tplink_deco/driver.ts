@@ -5,6 +5,7 @@ import net from 'net';
 import os from 'os';
 import { Driver } from 'homey';
 import decoapiwrapper, { AppLogger, DeviceListResponse, LoginAttempt } from '../../lib/client';
+import HostPoller, { PollSubscriber } from '../../lib/hostPoller';
 
 // Backoff schedule for the router's "session limit" 403 (RETRY:). The router
 // only releases a stale admin session after its own internal timeout, which
@@ -52,6 +53,55 @@ class TplinkDecoDriver extends Driver {
   // costs zero extra API calls.
   private nodeClientLists = new Map<string, Map<string, any[]>>();
 
+  // One shared poll loop per hostname (see lib/hostPoller.ts). The mesh-wide
+  // device_list is fetched once per cycle there and handed to every node on
+  // that host, instead of each node fetching the identical list itself.
+  private hostPollers = new Map<string, HostPoller<any>>();
+
+  private getHostPoller(hostname: string, logger: AppLogger): HostPoller<any> {
+    let poller = this.hostPollers.get(hostname);
+    if (!poller) {
+      poller = new HostPoller<any>(
+        async () => {
+          try {
+            return await (this.getOrCreateSharedApi(hostname, logger) as any).custom(
+              '/admin/device',
+              { form: 'device_list' },
+              this.readBody,
+            );
+          } catch (e) {
+            this.error('Failed to retrieve Device Data (shared poll)', e);
+            return { error_code: 1, result: {} };
+          }
+        },
+        (v: any) => v?.error_code === 0 && Array.isArray(v?.result?.device_list),
+        (...a: any[]) => this.log(`[poll ${hostname}]`, ...a),
+      );
+      this.hostPollers.set(hostname, poller);
+      this.log(`Shared poller created for ${hostname}`);
+    }
+    return poller;
+  }
+
+  /** Registers a device with its host's shared poller and runs it once now. */
+  public subscribePoll(hostname: string, deviceId: string, sub: PollSubscriber<any>, logger: AppLogger): Promise<void> {
+    return this.getHostPoller(hostname, logger).subscribe(deviceId, sub);
+  }
+
+  public setPollInterval(hostname: string, deviceId: string, intervalMs: number): void {
+    this.hostPollers.get(hostname)?.setInterval(deviceId, intervalMs);
+  }
+
+  /** Removes a device; the host's poller is stopped and dropped once it is empty. */
+  public unsubscribePoll(hostname: string, deviceId: string): void {
+    const poller = this.hostPollers.get(hostname);
+    if (!poller) return;
+    if (poller.unsubscribe(deviceId)) {
+      this.hostPollers.delete(hostname);
+      this.log(`Shared poller for ${hostname} stopped (no devices left)`);
+    }
+  }
+
   /**
    * Drops every piece of driver-level state that outlives a single device:
    * the shared API clients (each holding a router session and cookie jar), the
@@ -60,6 +110,8 @@ class TplinkDecoDriver extends Driver {
    * there for the crash report that prompted it.
    */
   public releaseResources(): void {
+    for (const poller of this.hostPollers.values()) poller.stop();
+    this.hostPollers.clear();
     this.sharedApis.clear();
     this.authQueue.clear();
     this.diagRan.clear();

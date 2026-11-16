@@ -1,10 +1,10 @@
 {
   "name": "net.tornbloms.deco",
-  "version": "1.2.25",
+  "version": "1.4.84",
   "main": "app.ts",
   "scripts": {
     "build": "tsc",
-    "test": "tsc -p test/tsconfig.json && node test/dist/test/regression-login-combo-state.js && node test/dist/test/regression-lockout-5003.js && node test/dist/test/regression-403-after-format-rejection.js && node test/dist/test/regression-https-fallback-on-econnrefused.js"
+    "test": "tsc -p test/tsconfig.json && node test/dist/test/regression-login-combo-state.js && node test/dist/test/regression-lockout-5003.js && node test/dist/test/regression-403-after-format-rejection.js && node test/dist/test/regression-https-fallback-on-econnrefused.js && node test/dist/test/regression-shared-host-poller.js"
   },
   "devDependencies": {
     "@tsconfig/node16": "^16.1.3",
