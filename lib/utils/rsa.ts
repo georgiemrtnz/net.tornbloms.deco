@@ -1,51 +1,45 @@
 import crypto, { createPublicKey, KeyObject } from 'crypto';
-import * as asn1 from 'asn1.js';
-import BN from 'bn.js';
 
-// Define the ASN.1 structure for an RSA public key
-const RSAPublicKeyASN = asn1.define('RSAPublicKey', function (this: any) {
-  this.seq().obj(this.key('n').int(), this.key('e').int());
-});
+/**
+ * Converts a hex string (as the router sends it) to unsigned big-endian
+ * base64url, the encoding a JWK uses for `n` and `e`. Odd-length input gets a
+ * leading zero nibble and leading zero bytes are dropped, so the key built
+ * from it is the same one bn.js + an ASN.1 RSAPublicKey encoder produced.
+ */
+function hexToBase64Url(hex: string): string {
+  let h = hex;
+  if (h.length % 2) h = `0${h}`;
+  let buf = Buffer.from(h, 'hex');
+  let start = 0;
+  while (start < buf.length - 1 && buf[start] === 0) start++;
+  buf = buf.subarray(start);
+  return buf.toString('base64url');
+}
 
 /**
  * Generates an RSA public key from provided modulus and exponent.
+ *
+ * Built with Node's own JWK import rather than asn1.js + bn.js, which were
+ * only here to DER-encode (n, e); the resulting key is identical.
  *
  * @param data - An array where the first element is the modulus (hex) and the second is the exponent (hex).
  * @returns The generated RSA public key as a KeyObject or null if an error occurs.
  */
 export function generateRsaKey(data: string[]): KeyObject | null {
-  // console.log('generateRsaKey: Starting RSA key generation.');
-  // console.log(`generateRsaKey: Modulus (hex): ${data[0]}`);
-  // console.log(`generateRsaKey: Exponent (hex): ${data[1]}`);
-
-  // Convert the modulus and exponent from hex strings to BN (Big Number) objects
-  const modulus = new BN(data[0], 16);
   const exponent = parseInt(data[1], 16);
 
   if (isNaN(exponent)) {
-    // console.log('generateRsaKey: Error parsing exponent.');
     return null;
   }
 
-  // Encode the modulus and exponent into ASN.1 DER format
-  const publicKeyDER = RSAPublicKeyASN.encode(
-    {
-      n: modulus,
-      e: new BN(exponent),
+  return createPublicKey({
+    key: {
+      kty: 'RSA',
+      n: hexToBase64Url(data[0]),
+      e: hexToBase64Url(exponent.toString(16)),
     },
-    'der',
-  );
-
-  // Create the RSA public key from the DER-encoded buffer
-  const key = createPublicKey({
-    key: publicKeyDER,
-    format: 'der',
-    type: 'pkcs1',
+    format: 'jwk',
   });
-
-  // console.log(`generateRsaKey: Generated RSA Public Key (DER, hex):\n${key.export({ format: 'der', type: 'pkcs1' }).toString('hex')}`,);
-
-  return key;
 }
 
 /**
@@ -56,10 +50,6 @@ export function generateRsaKey(data: string[]): KeyObject | null {
  * @returns The encrypted message as a hexadecimal string, or an empty string if an error occurs.
  */
 export function encryptRsa(msg: string, publicKey: KeyObject): string {
-  // console.log('encryptRsa: Starting RSA encryption.');
-  // console.log(`encryptRsa: Message to encrypt: ${msg}`);
-  // console.log(`encryptRsa: Key: ${publicKey.export({ format: 'der', type: 'pkcs1' }).toString('hex')}`,);
-
   try {
     // Convert the message to a Buffer
     const messageBuffer = Buffer.from(msg, 'utf-8');
@@ -80,12 +70,8 @@ export function encryptRsa(msg: string, publicKey: KeyObject): string {
     );
 
     // Convert the encrypted message to a hexadecimal string
-    const encryptedMsg = cipher.toString('hex');
-    // console.log(`encryptRsa: Encrypted message (hex): ${encryptedMsg}`);
-
-    return encryptedMsg;
+    return cipher.toString('hex');
   } catch (e) {
-    // console.log(`encryptRsa: Error encrypting message: ${e}`);
     return '';
   }
 }

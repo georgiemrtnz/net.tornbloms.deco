@@ -1,4 +1,4 @@
-import { CookieJar } from 'tough-cookie';
+import { CookieJar } from './cookieJar';
 
 interface PostConfig {
   method: 'POST';
@@ -16,7 +16,7 @@ export interface AppLogger {
 const consoleLogger: AppLogger = { log: console.log, error: console.error };
 
 /**
- * Minimal HTTP client using the Node.js native fetch API with tough-cookie
+ * Minimal HTTP client using the Node.js native fetch API with a small cookie jar
  * for session cookie management. Handles HTTP→HTTPS redirects automatically
  * (newer Deco firmware enforces HTTPS). TLS verification is disabled globally
  * via NODE_TLS_REJECT_UNAUTHORIZED=0 set in app.ts.

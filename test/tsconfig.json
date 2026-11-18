@@ -14,7 +14,7 @@
     "regression-lockout-5003.ts",
     "regression-403-after-format-rejection.ts",
     "regression-https-fallback-on-econnrefused.ts",
-    "regression-shared-host-poller.ts",
+    "regression-shared-host-poller.ts", "regression-cookie-jar.ts", "regression-rsa-jwk.ts", "regression-memory-lazy-deps.ts", "../app.ts", "../drivers/**/*.ts", "regression-clients-setting.ts",
     "../lib/**/*.ts"
   ]
 }

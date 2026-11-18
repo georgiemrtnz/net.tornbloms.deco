@@ -7,12 +7,42 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 import Homey from 'homey';
 import decoapiwrapper from './lib/client';
-const { Log } = require('homey-log');
-const HomeyLog = require('homey-betterstack');
+import HomeyLog from './lib/homeyLog';
 
 // Start debuger
 if (process.env.DEBUG === '1') {
   require('inspector').open(9229, '0.0.0.0');
+}
+
+/** Same timestamp format homey-log prints with its own log lines. */
+function homeyLogTime(): string {
+  const date = new Date();
+  const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+/**
+ * Builds the homey-log (Sentry/Raven) reporter only when it can actually send.
+ *
+ * homey-log requires raven at module load (~1.6 MB heap, ~6 MB RSS), but its
+ * Log constructor returns before configuring Raven when HOMEY_LOG_URL is not
+ * set — so without that env var nothing was ever sent. In that case we skip
+ * loading it, print the exact line homey-log used to print, and return null;
+ * reportIssue() already treats a null reporter as "disabled". With
+ * HOMEY_LOG_URL set, this is the same `new Log(...)` call as before.
+ */
+function createHomeyLog(homey: any): any {
+  const env: any = (Homey as any).env;
+  if (!env) {
+    console.error(homeyLogTime(), '[homey-log]', 'Error: could not access `HomeyModule.env`');
+    return null;
+  }
+  if (typeof env.HOMEY_LOG_URL !== 'string') {
+    console.error(homeyLogTime(), '[homey-log]', 'Error: expected `HOMEY_LOG_URL` env variable, homey-log is disabled');
+    return null;
+  }
+  const { Log } = require('homey-log');
+  return new Log({ homey, options: { sendTimeout: 15 } });
 }
 
 class TplinkDecoApp extends HomeyLog {
@@ -25,7 +55,7 @@ class TplinkDecoApp extends HomeyLog {
     // which is too tight for a home-network device reaching Sentry's ingest
     // endpoint — DNS + TLS handshake + POST routinely exceeds 1s, causing every
     // report to fail with ETIMEDOUT/socket hang up and never reach Sentry.
-    this.homeyLog = new Log({ homey: this.homey, options: { sendTimeout: 15 } });
+    this.homeyLog = createHomeyLog(this.homey);
     this.log(
       `${this.homey.manifest.id} - ${this.homey.manifest.version} started...`,
     );

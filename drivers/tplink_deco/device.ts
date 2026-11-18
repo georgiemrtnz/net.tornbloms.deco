@@ -137,6 +137,11 @@ class TplinkDecoDevice extends Device {
   private reAuthFailures = 0;
   private reAuthBlockedUntil = 0;
 
+  // Last value written to the read-only `clients` setting. undefined until
+  // the first poll, which seeds it from the stored setting so the first real
+  // change after a restart is still written. See writeClientsSetting().
+  private lastClientsSetting: string | undefined;
+
   // Persistent client history — all clients seen in the last 30 days.
   // Keyed by MAC address. Public so driver.ts can use it for autocomplete.
   trackedClients: Record<string, TrackedClient> = {};
@@ -1254,7 +1259,7 @@ class TplinkDecoDevice extends Device {
           const clientNames = clientList
             .map((client) => (this.driver as TplinkDecoDriver).decodeNickname(client.name))
             .join(', ');
-          await this.setSettings({ clients: clientNames });
+          await this.writeClientsSetting(clientNames);
           // Update capability with the number of connected clients
           await this.updateCapability('connected_clients', clientList.length);
 
@@ -1585,6 +1590,26 @@ class TplinkDecoDevice extends Device {
     } catch (err) {
       this.error('Failed to handle client state changes', err);
     }
+  }
+
+  /**
+   * Writes the read-only `clients` setting (comma-separated client names),
+   * skipping the write when the string is identical to what is already
+   * stored. The poll used to call setSettings() every cycle on every node,
+   * re-serialising and sending the same settings object over IPC each time.
+   * Homey does not call onSettings() for programmatic writes, so skipping an
+   * identical write changes nothing a user or Flow can observe. The cached
+   * value is only updated after a successful write, so a failed write is
+   * retried on the next poll, as before.
+   */
+  async writeClientsSetting(clientNames: string): Promise<void> {
+    if (this.lastClientsSetting === undefined) {
+      const stored = this.getSetting('clients');
+      this.lastClientsSetting = typeof stored === 'string' ? stored : undefined;
+    }
+    if (clientNames === this.lastClientsSetting) return;
+    await this.setSettings({ clients: clientNames });
+    this.lastClientsSetting = clientNames;
   }
 
   /**

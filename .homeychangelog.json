@@ -1,4 +1,7 @@
 {
+  "1.4.85": {
+    "en": "Lower memory use: logging and login helpers now load only what they need, and the client list setting is only saved when it changes. Devices, Flows and settings work as before."
+  },
   "1.4.84": {
     "en": "All Deco nodes on the same router now share one poll per cycle: the mesh device list is fetched once and shared, instead of once per node. Fewer requests to the router and lower memory use; node values, Flows and the reboot action work as before."
   },
